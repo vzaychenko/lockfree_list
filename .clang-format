@@ -1,5 +1,6 @@
 Language: Cpp
 BasedOnStyle: Google
+SeparateDefinitionBlocks: Always
 AccessModifierOffset: -4
 AlignAfterOpenBracket: AlwaysBreak
 AlignConsecutiveMacros: true

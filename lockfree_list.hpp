@@ -4,6 +4,7 @@
 #include <thread>
 #include <utility>
 #include <functional>
+#include <stdexcept>
 
 template<typename T>
 class List
@@ -228,12 +229,8 @@ class List
     static void
     DecRef(std::atomic<NodePtr>& node)
     {
-        NodePtr nodePtr = node.load(std::memory_order_acquire);
-        if (nodePtr && nodePtr->m_refCounter.fetch_sub(1, std::memory_order_acq_rel) == 1)
-        {
-            delete nodePtr;
-            node.store(nullptr, std::memory_order_release);
-        }
+        NodePtr nodePtr = node.exchange(nullptr, std::memory_order_acq_rel);
+        DecRef(nodePtr);
     }
 
     static void
@@ -244,10 +241,10 @@ class List
     }
 
     static void
-    IncRef(std::atomic<NodePtr>& node)
+    IncRef(NodePtr node)
     {
-        if (NodePtr nodePtr = node.load(std::memory_order_acquire))
-            nodePtr->m_refCounter.fetch_add(1, std::memory_order_acq_rel);
+        if (node)
+            node->m_refCounter.fetch_add(1, std::memory_order_acq_rel);
     }
 
     static NodePtr
@@ -298,135 +295,118 @@ public:
 
         ~iterator()
         {
-            DecRef(m_ptr);
+            NodePtr ptr = m_ptr.exchange(nullptr, std::memory_order_acq_rel);
+            DecRef(ptr);
         }
 
         iterator(const iterator& that)
-            : m_ptr(that.m_ptr.load(std::memory_order_acquire))
         {
-            IncRef(m_ptr);
+            NodePtr ptr = that.m_ptr.load(std::memory_order_acquire);
+            IncRef(ptr);
+            m_ptr.store(ptr, std::memory_order_release);
         }
 
         iterator(iterator&& that) noexcept
-            : m_ptr(that.m_ptr.load(std::memory_order_acquire))
         {
-            that.m_ptr.store(nullptr, std::memory_order_release);
+            NodePtr ptr = that.m_ptr.exchange(nullptr, std::memory_order_acq_rel);
+            m_ptr.store(ptr, std::memory_order_release);
         }
 
         iterator&
         operator=(const iterator& that)
         {
-            IncRef(that.m_ptr);
-            DecRef(m_ptr);
-            m_ptr.store(that.m_ptr.load(std::memory_order_acquire), std::memory_order_release);
-
+            if (this != &that)
+            {
+                NodePtr thatPtr = that.m_ptr.load(std::memory_order_acquire);
+                IncRef(thatPtr);
+                NodePtr oldPtr = m_ptr.exchange(thatPtr, std::memory_order_acq_rel);
+                DecRef(oldPtr);
+            }
             return *this;
         }
 
         iterator&
         operator=(iterator&& that) noexcept
         {
-            DecRef(m_ptr);
-            m_ptr.store(that.m_ptr.load(std::memory_order_acquire), std::memory_order_release);
-            that.m_ptr.store(nullptr, std::memory_order_release);
-
-            return *this;
-        }
-
-        const iterator&
-        operator++() const
-        {
-            const NodePtr ptr = m_ptr.load(std::memory_order_acquire);
-            m_ptr.store(WaitNext(ptr), std::memory_order_release);
-            DecRef(ptr);
-
+            if (this != &that)
+            {
+                NodePtr thatPtr = that.m_ptr.exchange(nullptr, std::memory_order_acq_rel);
+                NodePtr oldPtr = m_ptr.exchange(thatPtr, std::memory_order_acq_rel);
+                DecRef(oldPtr);
+            }
             return *this;
         }
 
         iterator&
         operator++()
         {
-            const NodePtr ptr = m_ptr.load(std::memory_order_acquire);
-            m_ptr.store(WaitNext(ptr), std::memory_order_release);
-            DecRef(ptr);
+            NodePtr ptr = m_ptr.load(std::memory_order_acquire);
+            if (!ptr)
+                return *this;
+            NodePtr nextPtr = WaitNext(ptr);
+            NodePtr oldPtr = m_ptr.exchange(nextPtr, std::memory_order_acq_rel);
+            DecRef(oldPtr);
 
             return *this;
-        }
-
-        const iterator
-        operator++(int) const
-        {
-            const NodePtr  ptr = m_ptr.load(std::memory_order_acquire);
-            const iterator it(m_ptr.load(std::memory_order_acquire));
-            m_ptr.store(WaitNext(ptr), std::memory_order_release);
-            DecRef(ptr);
-
-            return it;
         }
 
         iterator
         operator++(int)
         {
-            const NodePtr ptr = m_ptr.load(std::memory_order_acquire);
-            iterator      it(m_ptr.load(std::memory_order_acquire));
-            m_ptr.store(WaitNext(ptr), std::memory_order_release);
-            DecRef(ptr);
-
+            NodePtr ptr = m_ptr.load(std::memory_order_acquire);
+            IncRef(ptr);
+            iterator it;
+            it.m_ptr.store(ptr, std::memory_order_release);
+            if (ptr)
+            {
+                NodePtr nextPtr = WaitNext(ptr);
+                NodePtr oldPtr = m_ptr.exchange(nextPtr, std::memory_order_acq_rel);
+                DecRef(oldPtr);
+            }
             return it;
-        }
-
-        const iterator&
-        operator--() const
-        {
-            const NodePtr ptr = m_ptr.load(std::memory_order_acquire);
-            m_ptr.store(WaitPrev(ptr), std::memory_order_release);
-            DecRef(ptr);
-
-            return *this;
         }
 
         iterator&
         operator--()
         {
-            const NodePtr ptr = m_ptr.load(std::memory_order_acquire);
-            m_ptr.store(WaitPrev(ptr), std::memory_order_release);
-            DecRef(ptr);
+            NodePtr ptr = m_ptr.load(std::memory_order_acquire);
+            if (!ptr)
+                return *this;
+            NodePtr prevPtr = WaitPrev(ptr);
+            NodePtr oldPtr = m_ptr.exchange(prevPtr, std::memory_order_acq_rel);
+            DecRef(oldPtr);
 
             return *this;
-        }
-
-        const iterator
-        operator--(int) const
-        {
-            const NodePtr  ptr = m_ptr.load(std::memory_order_acquire);
-            const iterator it(m_ptr.load(std::memory_order_acquire));
-            m_ptr.store(WaitPrev(ptr), std::memory_order_release);
-            DecRef(ptr);
-
-            return it;
         }
 
         iterator
         operator--(int)
         {
-            const NodePtr ptr = m_ptr.load(std::memory_order_acquire);
-            iterator      it(m_ptr.load(std::memory_order_acquire));
-            m_ptr.store(WaitPrev(ptr), std::memory_order_release);
-            DecRef(ptr);
-
+            NodePtr ptr = m_ptr.load(std::memory_order_acquire);
+            IncRef(ptr);
+            iterator it;
+            it.m_ptr.store(ptr, std::memory_order_release);
+            if (ptr)
+            {
+                NodePtr prevPtr = WaitPrev(ptr);
+                NodePtr oldPtr = m_ptr.exchange(prevPtr, std::memory_order_acq_rel);
+                DecRef(oldPtr);
+            }
             return it;
         }
 
         T&
         operator*() const
         {
-            return m_ptr.load(std::memory_order_acquire)->data;
+            NodePtr ptr = m_ptr.load(std::memory_order_acquire);
+            return ptr->data;
         }
 
         T*
         operator->() const
         {
-            return &(m_ptr.load(std::memory_order_acquire)->data);
+            NodePtr ptr = m_ptr.load(std::memory_order_acquire);
+            return &(ptr->data);
         }
 
         bool
@@ -445,7 +425,7 @@ public:
         explicit iterator(NodePtr ptr)
             : m_ptr(ptr)
         {
-            IncRef(m_ptr);
+            IncRef(ptr);
         }
 
         NodePtr
@@ -463,15 +443,24 @@ public:
         : m_last(Node::Create())
         , m_size(0)
     {
+        if (!m_last)
+            throw std::bad_alloc();
         m_last->m_prev.store(Link{m_last, 0}, std::memory_order_release);
         m_last->m_next.store(Link{m_last, 0}, std::memory_order_release);
     }
 
-    virtual ~List()
+    ~List()
     {
         clear();
         delete m_last;
     }
+
+    List(const List&) = delete;
+    List&
+    operator=(const List&) = delete;
+    List(List&&)           = delete;
+    List&
+    operator=(List&&) = delete;
 
     iterator
     begin()
@@ -482,13 +471,19 @@ public:
     T&
     front()
     {
-        return *begin();
+        auto it = begin();
+        if (it == end())
+            throw std::out_of_range("front() called on empty list");
+        return *it;
     }
 
     T&
     back()
     {
-        return *rbegin();
+        auto it = rbegin();
+        if (it == end())
+            throw std::out_of_range("back() called on empty list");
+        return *it;
     }
 
     const iterator
@@ -558,6 +553,8 @@ public:
     {
         iterator      it;
         const NodePtr newNode = Node::Create(data);
+        if (!newNode)
+            throw std::bad_alloc();
         do
         {
             it = Insert(begin(), newNode);
@@ -571,6 +568,8 @@ public:
     {
         iterator      it;
         const NodePtr newNode = Node::Create(std::move(data));
+        if (!newNode)
+            throw std::bad_alloc();
         do
         {
             it = Insert(begin(), newNode);
@@ -584,6 +583,8 @@ public:
     {
         iterator      it;
         const NodePtr newNode = Node::Create(data);
+        if (!newNode)
+            throw std::bad_alloc();
         do
         {
             it = Insert(end(), newNode);
@@ -597,6 +598,8 @@ public:
     {
         iterator      it;
         const NodePtr newNode = Node::Create(std::move(data));
+        if (!newNode)
+            throw std::bad_alloc();
         do
         {
             it = Insert(end(), newNode);
@@ -620,6 +623,8 @@ public:
     iterator
     erase(iterator it)
     {
+        if (it == end())
+            return it;
         return Erase(it).second;
     }
 
@@ -663,9 +668,7 @@ public:
                     NodePtr item2 = iter2.m_ptr.load(std::memory_order_acquire);
                     if (comp(item2->data, item1->data))
                     {
-                        T tmp       = std::move(item1->data);
-                        item1->data = std::move(item2->data);
-                        item2->data = std::move(tmp);
+                        std::swap(item1->data, item2->data);
                         shouldBreak = false;
                     }
                 }
@@ -693,10 +696,11 @@ private:
     std::pair<bool, iterator>
     Erase(iterator it)
     {
-        NodePtr                  h   = it.handle();
-        const size_t             s   = m_size.load(std::memory_order_acquire);
+        NodePtr h = it.handle();
+        if (!h)
+            return std::make_pair(false, end());
         std::pair<bool, NodePtr> res = h->Remove();
-        if (res.first && s > 0)
+        if (res.first)
             m_size.fetch_sub(1, std::memory_order_acq_rel);
 
         return std::make_pair(res.first, iterator(res.second));
